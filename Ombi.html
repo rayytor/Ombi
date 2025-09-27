@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ombi</title>
+<style>
+html, body {
+  margin:0; padding:0; height:100%;
+  display:flex; justify-content:center; align-items:center;
+  background:#111; font-family:Verdana, sans-serif; color:white;
+  overflow:hidden;
+}
+#game-container { position: relative; }
+canvas { display:block; border:2px solid #444; }
+
+/* Pause button */
+#pauseBtn {
+  position:absolute; top:10px; right:10px;
+  background:rgba(0,0,0,0.5); border:none; color:white;
+  font-size:24px; padding:8px 12px; cursor:pointer;
+  border-radius:5px; z-index:10;
+}
+#pauseBtn:hover { background: rgba(255,255,255,0.2); }
+
+/* Weapon buttons */
+.weapon-buttons {
+  position:absolute; bottom:20px; right:20px;
+  display:flex; flex-direction:column; gap:15px; pointer-events:auto;
+}
+.weapon-buttons button {
+  background:rgba(0,0,0,0.8);
+  border:2px solid #aaa;
+  color:white;
+  padding:20px;
+  border-radius:10px;
+  font-size:20px;
+  cursor:pointer;
+}
+.weapon-buttons button:hover {
+  background:rgba(255,255,255,0.2);
+}
+
+/* Restart button styles */
+#restartBtn {
+  position:absolute;
+  background:rgba(0,0,0,0.6);
+  color:white; border:none; border-radius:8px;
+  padding:10px 20px; font-size:22px; cursor:pointer; z-index:20;
+}
+#restartBtn:hover { background: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game" width="800" height="600"></canvas>
+  <button id="pauseBtn">⏸️</button>
+
+  <div class="weapon-buttons">
+    <button data-weapon="0">🔫 Pistol</button>
+    <button data-weapon="1">💥 Rifle</button>
+    <button data-weapon="2">🗡️ Melee</button>
+  </div>
+</div>
+
+<script>
+/* ==========================
+   Ombi — Double-Tap Move + Drag Aim
+   ========================== */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// Input state
+const keys = {};
+let mouseDown = false;
+let paused = false;
+
+// Movement / aiming
+let moving = false;
+let moveTarget = null;
+let pointerX = canvas.width/2, pointerY = canvas.height/2;
+
+// Double tap detection
+let lastTapTime = 0;
+
+// UI
+const pauseBtn = document.getElementById('pauseBtn');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? '▶️' : '⏸️';
+  if (!paused) startSpawning();
+  else clearInterval(spawnInterval);
+});
+
+// Player / game state
+const player = { x:400, y:300, size:20, color:'teal', speed:3, health:100 };
+const bullets = [], muzzleFlashes = [], enemies = [];
+let kills = 0;
+let zoneX = 400, zoneY = 300, zoneRadius = 300;
+let grassBlades = [];
+
+// Weapons
+const weapons = [
+  { name:'Pistol', damage:40, fireRate:400, automatic:false, gunLength:15, gunWidth:5, color:'#999', recoil:2, type:'gun', magSize:6, ammo:6, reloadTime:1500, bulletSpeed:7 },
+  { name:'Rifle',  damage:10, fireRate:120, automatic:true,  gunLength:25, gunWidth:5, color:'#8B4513', recoil:1, type:'gun', magSize:20, ammo:20, reloadTime:2500, bulletSpeed:9 },
+  { name:'Melee',  damage:8,  fireRate:200, automatic:false, range:40, knockback:12, color:'#f39c12', type:'melee' }
+];
+let currentWeapon = 0, lastShotTime = 0, reloading = false, reloadStartTime = 0, reloadRemaining = 0;
+let meleeSwing = null;
+
+// Input — keyboard
+document.addEventListener('keydown', e => keys[e.key] = true);
+document.addEventListener('keyup', e => keys[e.key] = false);
+
+// Mouse input
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  pointerX = e.clientX - rect.left;
+  pointerY = e.clientY - rect.top;
+});
+canvas.addEventListener("mousedown", e => { mouseDown = true; handleTap(e.clientX, e.clientY); });
+canvas.addEventListener("mouseup", () => mouseDown = false);
+
+// Touch input
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const x = e.changedTouches[0].clientX - rect.left;
+  const y = e.changedTouches[0].clientY - rect.top;
+  mouseDown = true;
+  pointerX = x; pointerY = y;
+  handleTap(x, y);
+}, { passive: false });
+
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const x = e.changedTouches[0].clientX - rect.left;
+  const y = e.changedTouches[0].clientY - rect.top;
+  pointerX = x; pointerY = y;
+}, { passive: false });
+
+canvas.addEventListener("touchend", () => { mouseDown = false; }, { passive: false });
+
+// Double/single tap
+function handleTap(x, y) {
+  const now = Date.now();
+  const timeSinceLast = now - lastTapTime;
+
+  if (timeSinceLast < 300) {
+    moving = !moving;
+    moveTarget = moving ? { x, y } : null;
+  } else {
+    attack();
+  }
+  lastTapTime = now;
+}
+
+// Weapon buttons
+document.querySelectorAll(".weapon-buttons button").forEach(btn=>{
+  btn.addEventListener("click", ()=> {
+    currentWeapon = parseInt(btn.dataset.weapon);
+  });
+});
+
+// Enemies
+let spawnInterval;
+function spawnEnemy(){
+  if(paused) return;
+  const x = Math.random() * canvas.width, y = Math.random() * canvas.height;
+  const speed = 0.6 + Math.random()*0.4, size = 20, health = 50;
+  enemies.push({ x, y, size, color:'crimson', speed, health, maxHealth:health, dx:0, dy:0 });
+}
+function startSpawning(){ spawnInterval = setInterval(spawnEnemy, 3000); }
+startSpawning();
+
+// Attack
+function attack(){
+  if (paused || reloading) return;
+  const now = Date.now();
+  const weapon = weapons[currentWeapon];
+  if (now - lastShotTime < weapon.fireRate) return;
+  if (weapon.type === 'gun' && weapon.ammo <= 0) return;
+  lastShotTime = now;
+
+  const angle = Math.atan2(pointerY - player.y, pointerX - player.x);
+
+  if (weapon.type === 'gun') {
+    const barrelX = player.x + Math.cos(angle) * (player.size/2 + weapon.gunLength);
+    const barrelY = player.y + Math.sin(angle) * (player.size/2 + weapon.gunLength);
+    bullets.push({ x: barrelX, y: barrelY, dx: Math.cos(angle) * weapon.bulletSpeed, dy: Math.sin(angle) * weapon.bulletSpeed, damage:weapon.damage, angle:angle });
+    player.x -= Math.cos(angle) * weapon.recoil;
+    player.y -= Math.sin(angle) * weapon.recoil;
+    muzzleFlashes.push({ x: barrelX, y: barrelY, angle: angle, size: 12, created: Date.now() });
+    weapon.ammo--;
+    if (weapon.ammo <= 0) {
+      reloading = true;
+      reloadRemaining = weapon.reloadTime;
+      reloadStartTime = Date.now();
+    }
+  } else if (weapon.type === 'melee') {
+    meleeSwing = { start: Date.now(), duration: weapon.fireRate, baseAngle: angle };
+  }
+}
+
+function handleAuto(){
+  if (mouseDown && weapons[currentWeapon].automatic && !paused && !reloading) {
+    attack();
+  }
+}
+
+// Update
+let lastZoneDamage = Date.now();
+function update(){
+  if (paused) return;
+
+  // Reload
+  if (reloading) {
+    const weapon = weapons[currentWeapon];
+    const now = Date.now();
+    reloadRemaining -= now - reloadStartTime;
+    reloadStartTime = now;
+    if (reloadRemaining <= 0) {
+      weapon.ammo = weapon.magSize;
+      reloading = false;
+      reloadRemaining = 0;
+    }
+  }
+
+  // Keyboard move
+  if (keys['w']) player.y -= player.speed;
+  if (keys['s']) player.y += player.speed;
+  if (keys['a']) player.x -= player.speed;
+  if (keys['d']) player.x += player.speed;
+
+  // Double-tap move
+  if (moving && moveTarget) {
+    const dx = moveTarget.x - player.x;
+    const dy = moveTarget.y - player.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 2) {
+      player.x += (dx / dist) * player.speed;
+      player.y += (dy / dist) * player.speed;
+    }
+  }
+
+  handleAuto();
+
+  // Bullets
+  for (let i=bullets.length-1; i>=0; i--){
+    let b = bullets[i];
+    b.x += b.dx; b.y += b.dy;
+    if (b.x<0||b.x>canvas.width||b.y<0||b.y>canvas.height){ bullets.splice(i,1); continue; }
+    for (let j=enemies.length-1; j>=0; j--){
+      let e = enemies[j];
+      if (Math.hypot(b.x-e.x, b.y-e.y) < e.size/2){
+        e.health -= b.damage; bullets.splice(i,1);
+        if (e.health<=0){ enemies.splice(j,1); kills++; }
+        break;
+      }
+    }
+  }
+
+  // Enemies follow player
+  for (let e of enemies){
+    const dx = player.x - e.x, dy = player.y - e.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist>0){ e.dx=(dx/dist)*e.speed; e.dy=(dy/dist)*e.speed; e.x+=e.dx; e.y+=e.dy; }
+    if (dist<player.size/2+e.size/2){ player.health--; if(player.health<=0) endGame(); }
+  }
+
+  // Zone shrink
+  zoneRadius -= 0.01;
+  const distToZone = Math.hypot(player.x-zoneX, player.y-zoneY);
+  if (distToZone>zoneRadius){
+    const now = Date.now();
+    if (now - lastZoneDamage > 1000){
+      player.health -= 5; lastZoneDamage=now;
+      if(player.health<=0) endGame();
+    }
+  }
+
+  // Melee
+  if (meleeSwing){
+    const weapon = weapons[2];
+    const elapsed = Date.now()-meleeSwing.start;
+    if (elapsed<meleeSwing.duration){
+      for (let i=enemies.length-1; i>=0; i--){
+        let e = enemies[i];
+        const dx=e.x-player.x, dy=e.y-player.y;
+        const dist=Math.hypot(dx,dy);
+        if (dist<weapon.range+e.size/2){
+          e.health-=weapon.damage;
+          e.x+=(dx/dist)*weapon.knockback; e.y+=(dy/dist)*weapon.knockback;
+          if (e.health<=0){ enemies.splice(i,1); kills++; }
+        }
+      }
+    } else meleeSwing=null;
+  }
+
+  // Grass blades
+  if(grassBlades.length<40){
+    grassBlades.push({x:Math.random()*canvas.width,y:Math.random()*canvas.height,length:10+Math.random()*10,angle:Math.random()*Math.PI});
+  }
+}
+
+// Draw
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Zone
+  ctx.strokeStyle='lime'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(zoneX,zoneY,zoneRadius,0,Math.PI*2); ctx.stroke();
+
+  // Grass
+  ctx.strokeStyle='green';
+  for (let g of grassBlades){
+    ctx.beginPath(); ctx.moveTo(g.x,g.y);
+    ctx.lineTo(g.x+Math.cos(g.angle)*g.length,g.y-Math.sin(g.angle)*g.length);
+    ctx.stroke();
+  }
+
+  // Player
+  ctx.fillStyle=player.color;
+  ctx.beginPath(); ctx.arc(player.x,player.y,player.size/2,0,Math.PI*2); ctx.fill();
+
+  // Gun
+  const w = weapons[currentWeapon];
+  if (w.type==='gun'){
+    const angle = Math.atan2(pointerY-player.y,pointerX-player.x);
+    ctx.save(); ctx.translate(player.x,player.y); ctx.rotate(angle);
+    ctx.fillStyle=w.color;
+    ctx.fillRect(player.size/2, -w.gunWidth/2, w.gunLength, w.gunWidth);
+    ctx.restore();
+  }
+
+  // Bullets
+  ctx.fillStyle='yellow';
+  for (let b of bullets){ ctx.beginPath(); ctx.arc(b.x,b.y,3,0,Math.PI*2); ctx.fill(); }
+
+  // Enemies
+  for (let e of enemies){
+    ctx.fillStyle=e.color;
+    ctx.beginPath(); ctx.arc(e.x,e.y,e.size/2,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='red'; ctx.fillRect(e.x-e.size/2, e.y-e.size/2-10, e.size, 5);
+    ctx.fillStyle='lime'; ctx.fillRect(e.x-e.size/2, e.y-e.size/2-10, e.size*(e.health/e.maxHealth), 5);
+  }
+
+  // HUD
+  ctx.fillStyle='white'; ctx.font='20px Verdana';
+  ctx.fillText(`HP: ${player.health}`,10,20);
+  ctx.fillText(`Kills: ${kills}`,10,45);
+  ctx.fillText(`Zone: ${zoneRadius.toFixed(1)}`,10,70);
+  ctx.fillText(`${weapons[currentWeapon].name}`,10,95);
+  if (weapons[currentWeapon].type==='gun'){
+    if (reloading){
+      ctx.fillText(`Reloading...`,10,120);
+    } else {
+      ctx.fillText(`Ammo: ${weapons[currentWeapon].ammo}/${weapons[currentWeapon].magSize}`,10,120);
+    }
+  }
+}
+
+function gameLoop(){
+  update(); draw();
+  if(player.health>0){ requestAnimationFrame(gameLoop); }
+  else{
+    ctx.fillStyle='white'; ctx.font='50px Verdana';
+    ctx.fillText("Game Over",220,300);
+    ctx.fillText("Total Kills: "+kills,220,360);
+    showRestartButton();
+  }
+}
+
+// Restart
+function showRestartButton(){
+  let btn=document.createElement("button");
+  btn.id="restartBtn"; btn.textContent="Restart";
+  btn.style.left=(canvas.width/2-60)+"px";
+  btn.style.top=(canvas.height/2+50)+"px";
+  document.getElementById("game-container").appendChild(btn);
+  btn.addEventListener("click",()=>location.reload());
+}
+function endGame(){ clearInterval(spawnInterval); player.health=0; }
+
+gameLoop();
+</script>
+</body>
+</html>
