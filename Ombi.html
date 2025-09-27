@@ -13,7 +13,6 @@ html, body {
 #game-container { position: relative; }
 canvas { display:block; border:2px solid #444; }
 
-/* Pause button */
 #pauseBtn {
   position:absolute; top:10px; right:10px;
   background:rgba(0,0,0,0.5); border:none; color:white;
@@ -22,25 +21,6 @@ canvas { display:block; border:2px solid #444; }
 }
 #pauseBtn:hover { background: rgba(255,255,255,0.2); }
 
-/* Weapon buttons */
-.weapon-buttons {
-  position:absolute; bottom:20px; right:20px;
-  display:flex; flex-direction:column; gap:15px; pointer-events:auto;
-}
-.weapon-buttons button {
-  background:rgba(0,0,0,0.8);
-  border:2px solid #aaa;
-  color:white;
-  padding:20px;
-  border-radius:10px;
-  font-size:20px;
-  cursor:pointer;
-}
-.weapon-buttons button:hover {
-  background:rgba(255,255,255,0.2);
-}
-
-/* Restart button styles */
 #restartBtn {
   position:absolute;
   background:rgba(0,0,0,0.6);
@@ -52,339 +32,740 @@ canvas { display:block; border:2px solid #444; }
 </head>
 <body>
 <div id="game-container">
-  <canvas id="game" width="800" height="600"></canvas>
+  <canvas id="game" width="800" height="600" aria-label="Game canvas" tabindex="0"></canvas>
   <button id="pauseBtn">⏸️</button>
-
-  <div class="weapon-buttons">
-    <button data-weapon="0"> Pistol</button>
-    <button data-weapon="1"> Rifle</button>
-    <button data-weapon="2"> Melee</button>
-  </div>
 </div>
-
 <script>
-/* ==========================
-   Ombi — Double-Tap Move + Drag Aim
-   ========================== */
+const CONFIG = {
+  VIEW_W: 800,
+  VIEW_H: 600,
+  MAP_W: 2200,
+  MAP_H: 1800,
+  ZONE_SHRINK_RATE: 0.01,
+  ENEMY_SPAWN_INTERVAL: 3000,
+  GRASS_BLADE_COUNT: 70,
+  GRASS_LENGTH_MIN: 10,
+  GRASS_LENGTH_MAX: 20,
+  PLAYER_START: { x: 1100, y: 900, size: 20, color: 'teal', speed: 3, health: 100 },
+  ZONE_START: { x: 1100, y: 900, radius: 900 },
+  ENEMY_HIT_ANIMATION_TIME: 1000,
+  ENEMY_HIT_DAMAGE: 10,
+  CRATE_SIZE: 24,
+  CRATE_AMMO: {
+    rifle: 20,
+    pistol: 6
+  },
+  WEAPONS: [
+    { name:'Pistol', damage:40, fireRate:400, automatic:false, gunLength:15, gunWidth:5, color:'#999', recoil:2, type:'gun', magSize:6, ammo:6, reloadTime:1500, bulletSpeed:7, maxAmmo:30, totalAmmo:30 },
+    { name:'Rifle',  damage:10, fireRate:120, automatic:true,  gunLength:25, gunWidth:5, color:'#8B4513', recoil:1, type:'gun', magSize:20, ammo:20, reloadTime:2500, bulletSpeed:9, maxAmmo:100, totalAmmo:100 },
+    { name:'Stick', damage:7, fireRate:300, automatic:false, stickLength:28, stickWidth:6, color:'#d2b48c', type:'melee', knockback:32 }
+  ]
+};
+
+function clamp(val, min, max) { return Math.max(min, Math.min(val, max)); }
+
+class Player {
+  constructor(cfg) { Object.assign(this, cfg); }
+  reset() { Object.assign(this, CONFIG.PLAYER_START); }
+}
+
+class Enemy {
+  constructor(x, y, size, color, speed, health) {
+    Object.assign(this, { 
+      x, y, size, color, speed, health, maxHealth: health, 
+      dx: 0, dy: 0, vx: 0, vy: 0,
+      hitting: false,
+      hitAnimStart: 0
+    });
+    this.hidden = false;
+  }
+}
+class Bullet {
+  constructor(x, y, dx, dy, damage, angle) {
+    Object.assign(this, { x, y, dx, dy, damage, angle, visible: true });
+  }
+}
+class MuzzleFlash {
+  constructor(x, y, angle, size) {
+    Object.assign(this, { x, y, angle, size, created: Date.now() });
+  }
+}
+class GrassBlade {
+  constructor(x, y, length, angle) {
+    Object.assign(this, { x, y, length, angle });
+  }
+}
+class Crate {
+  constructor(x, y, type) {
+    Object.assign(this, { x, y, size: CONFIG.CRATE_SIZE, type, opened: false, hidden: false });
+  }
+}
+
+class Game {
+  constructor(canvas, ctx) {
+    this.canvas = canvas;
+    this.ctx = ctx;
+    this.mapW = CONFIG.MAP_W;
+    this.mapH = CONFIG.MAP_H;
+    this.viewW = CONFIG.VIEW_W;
+    this.viewH = CONFIG.VIEW_H;
+    this.zone = { ...CONFIG.ZONE_START };
+    this.player = new Player(CONFIG.PLAYER_START);
+    this.kills = 0;
+    this.weapons = JSON.parse(JSON.stringify(CONFIG.WEAPONS));
+    this.currentWeapon = 0;
+    this.lastShotTime = 0;
+    this.reloading = false;
+    this.reloadStartTime = 0;
+    this.reloadRemaining = 0;
+    this.pointerX = this.viewW / 2;
+    this.pointerY = this.viewH / 2;
+    this.bullets = [];
+    this.muzzleFlashes = [];
+    this.enemies = [];
+    this.grassBlades = [];
+    this.crates = [];
+    this.lastZoneDamage = Date.now();
+    this.spawnTimer = null;
+    this.keys = {};
+    this.mouseDown = false;
+    this.paused = false;
+    this.running = false;
+    this.lastFrameTime = performance.now();
+    this.viewX = 0;
+    this.viewY = 0;
+    this.outOfAmmoState = { pistol: false, rifle: false };
+    this.openCrateRequested = false;
+  }
+
+  start() {
+    this.running = true;
+    this.paused = false;
+    this.zone = { ...CONFIG.ZONE_START };
+    this.player.reset();
+    this.kills = 0;
+    this.weapons = JSON.parse(JSON.stringify(CONFIG.WEAPONS));
+    this.weapons[0].totalAmmo = this.weapons[0].maxAmmo = 30;
+    this.weapons[1].totalAmmo = this.weapons[1].maxAmmo = 100;
+    this.weapons[0].ammo = this.weapons[0].magSize;
+    this.weapons[1].ammo = this.weapons[1].magSize;
+    this.currentWeapon = 0;
+    this.lastShotTime = 0;
+    this.reloading = false;
+    this.reloadStartTime = 0;
+    this.reloadRemaining = 0;
+    this.pointerX = this.viewW / 2;
+    this.pointerY = this.viewH / 2;
+    this.bullets = [];
+    this.muzzleFlashes = [];
+    this.enemies = [];
+    this.crates = [];
+    this.grassBlades = [];
+    this.lastZoneDamage = Date.now();
+    this.keys = {};
+    this.mouseDown = false;
+    this.outOfAmmoState = { pistol: false, rifle: false };
+    this.openCrateRequested = false;
+    clearInterval(this.spawnTimer);
+    this.spawnTimer = setInterval(() => this.spawnEnemy(), CONFIG.ENEMY_SPAWN_INTERVAL);
+    this.removeRestartBtn();
+    this.lastFrameTime = performance.now();
+    this.gameLoop();
+  }
+
+  pause() {
+    this.paused = true;
+    clearInterval(this.spawnTimer);
+  }
+
+  resume() {
+    if (!this.running) return;
+    this.paused = false;
+    this.lastZoneDamage = Date.now();
+    clearInterval(this.spawnTimer);
+    this.spawnTimer = setInterval(() => this.spawnEnemy(), CONFIG.ENEMY_SPAWN_INTERVAL);
+    this.lastFrameTime = performance.now();
+    this.gameLoop();
+  }
+
+  endGame() {
+    this.running = false;
+    clearInterval(this.spawnTimer);
+    this.player.health = 0;
+    this.showRestartBtn();
+  }
+
+  showRestartBtn() {
+    this.removeRestartBtn();
+    const btn = document.createElement("button");
+    btn.id = "restartBtn";
+    btn.textContent = "Restart";
+    btn.style.left = (this.viewW/2-60)+"px";
+    btn.style.top = (this.viewH/2+50)+"px";
+    document.getElementById("game-container").appendChild(btn);
+    btn.addEventListener("click", () => this.start());
+  }
+
+  removeRestartBtn() {
+    const btn = document.getElementById("restartBtn");
+    if (btn) btn.remove();
+  }
+
+  spawnEnemy() {
+    if (this.paused || !this.running) return;
+    let angle = Math.random() * Math.PI * 2;
+    let rad = Math.random() * (this.zone.radius-30);
+    let x = this.zone.x + Math.cos(angle) * rad;
+    let y = this.zone.y + Math.sin(angle) * rad;
+    x = clamp(x, 30, this.mapW-30);
+    y = clamp(y, 30, this.mapH-30);
+    const baseHealth = 50, baseSpeed = 0.6, size = 20;
+    const health = baseHealth + this.kills * 2;
+    const speed = baseSpeed + Math.random()*0.4 + this.kills * 0.05;
+    this.enemies.push(new Enemy(x, y, size, 'crimson', speed, health));
+  }
+
+  handleInput() {
+    if (this.keys['w']) this.player.y -= this.player.speed;
+    if (this.keys['s']) this.player.y += this.player.speed;
+    if (this.keys['a']) this.player.x -= this.player.speed;
+    if (this.keys['d']) this.player.x += this.player.speed;
+    this.player.x = clamp(this.player.x, this.player.size/2, this.mapW-this.player.size/2);
+    this.player.y = clamp(this.player.y, this.player.size/2, this.mapH-this.player.size/2);
+  }
+
+  spawnCrates(type) {
+    for (let i=0; i<5; ++i) {
+      let x, y, tries = 0;
+      do {
+        let angle = Math.random() * Math.PI * 2;
+        let rad = Math.random() * (this.zone.radius - CONFIG.CRATE_SIZE*2);
+        x = this.zone.x + Math.cos(angle) * rad;
+        y = this.zone.y + Math.sin(angle) * rad;
+        x = clamp(x, CONFIG.CRATE_SIZE, this.mapW-CONFIG.CRATE_SIZE);
+        y = clamp(y, CONFIG.CRATE_SIZE, this.mapH-CONFIG.CRATE_SIZE);
+        tries++;
+      } while (
+        x > this.viewX-40 && x < this.viewX+this.viewW+40 &&
+        y > this.viewY-40 && y < this.viewY+this.viewH+40 &&
+        tries < 50
+      );
+      this.crates.push(new Crate(x, y, type));
+    }
+  }
+
+  attack() {
+    if (this.paused || this.reloading || !this.running) return;
+    const now = Date.now();
+    const weapon = this.weapons[this.currentWeapon];
+    if (now - this.lastShotTime < weapon.fireRate) return;
+    if (weapon.type === 'gun' && weapon.ammo <= 0) return;
+    this.lastShotTime = now;
+
+    const worldPointerX = this.viewX + this.pointerX;
+    const worldPointerY = this.viewY + this.pointerY;
+    const angle = Math.atan2(worldPointerY - this.player.y, worldPointerX - this.player.x);
+
+    if (weapon.type === 'gun') {
+      if (weapon.ammo > 0) {
+        const barrelX = this.player.x + Math.cos(angle) * (this.player.size/2 + weapon.gunLength);
+        const barrelY = this.player.y + Math.sin(angle) * (this.player.size/2 + weapon.gunLength);
+        this.bullets.push(new Bullet(barrelX, barrelY, Math.cos(angle)*weapon.bulletSpeed, Math.sin(angle)*weapon.bulletSpeed, weapon.damage, angle));
+        this.player.x -= Math.cos(angle) * weapon.recoil;
+        this.player.y -= Math.sin(angle) * weapon.recoil;
+        this.muzzleFlashes.push(new MuzzleFlash(barrelX, barrelY, angle, 12));
+        weapon.ammo--;
+        if (weapon.ammo <= 0) {
+          if (weapon.totalAmmo > 0) {
+            this.reloading = true;
+            this.reloadRemaining = weapon.reloadTime;
+            this.reloadStartTime = Date.now();
+          } else {
+            if (weapon.name === 'Pistol' && !this.outOfAmmoState.pistol) {
+              this.outOfAmmoState.pistol = true;
+              this.spawnCrates('pistol');
+            }
+            if (weapon.name === 'Rifle' && !this.outOfAmmoState.rifle) {
+              this.outOfAmmoState.rifle = true;
+              this.spawnCrates('rifle');
+            }
+          }
+        }
+      }
+    }
+  }
+
+  handleAuto() {
+    if (this.mouseDown && this.weapons[this.currentWeapon].automatic && !this.paused && !this.reloading && this.running) {
+      this.attack();
+    }
+  }
+
+  update(delta) {
+    if (!this.running || this.paused) return;
+
+    this.viewX = clamp(this.player.x - this.viewW/2, 0, this.mapW - this.viewW);
+    this.viewY = clamp(this.player.y - this.viewH/2, 0, this.mapH - this.viewH);
+
+    if (this.reloading) {
+      const weapon = this.weapons[this.currentWeapon];
+      const now = Date.now();
+      this.reloadRemaining -= now - this.reloadStartTime;
+      this.reloadStartTime = now;
+      if (this.reloadRemaining <= 0) {
+        let needed = weapon.magSize - weapon.ammo;
+        let take = Math.min(needed, weapon.totalAmmo);
+        weapon.ammo += take;
+        weapon.totalAmmo -= take;
+        this.reloading = false;
+        this.reloadRemaining = 0;
+        if (weapon.totalAmmo <= 0) {
+          if (weapon.name === 'Pistol' && !this.outOfAmmoState.pistol) {
+            this.outOfAmmoState.pistol = true;
+            this.spawnCrates('pistol');
+          }
+          if (weapon.name === 'Rifle' && !this.outOfAmmoState.rifle) {
+            this.outOfAmmoState.rifle = true;
+            this.spawnCrates('rifle');
+          }
+        }
+      }
+    }
+    this.handleInput();
+    this.handleAuto();
+
+    // Bullets
+    for (let i = this.bullets.length-1; i >= 0; i--) {
+      let b = this.bullets[i];
+      b.x += b.dx;
+      b.y += b.dy;
+      b.visible = true;
+      if (b.x < 0 || b.x > this.mapW || b.y < 0 || b.y > this.mapH) {
+        this.bullets.splice(i,1);
+        continue;
+      }
+      for (let j = this.enemies.length-1; j >= 0; j--) {
+        let e = this.enemies[j];
+        if (e.hidden) continue;
+        if (Math.hypot(b.x-e.x, b.y-e.y) < e.size/2) {
+          e.health -= b.damage;
+          this.bullets.splice(i,1);
+          break;
+        }
+      }
+    }
+
+    // Crate pickup (open with E while touching)
+    for (let i = 0; i < this.crates.length; i++) {
+      let crate = this.crates[i];
+      crate.hidden = (
+        crate.x < this.viewX - crate.size ||
+        crate.x > this.viewX + this.viewW + crate.size ||
+        crate.y < this.viewY - crate.size ||
+        crate.y > this.viewY + this.viewH + crate.size
+      );
+      // Player must press "E" while touching to open
+      if (!crate.opened && !crate.hidden &&
+        Math.hypot(this.player.x-crate.x, this.player.y-crate.y) < this.player.size/2 + crate.size/2
+        && this.openCrateRequested
+      ) {
+        crate.opened = true;
+        if (crate.type === 'rifle') {
+          let weapon = this.weapons[1];
+          weapon.totalAmmo += CONFIG.CRATE_AMMO.rifle;
+          this.outOfAmmoState.rifle = false;
+          if (weapon.ammo === 0 && !this.reloading) {
+            this.reloading = true;
+            this.reloadRemaining = weapon.reloadTime;
+            this.reloadStartTime = Date.now();
+          }
+        }
+        if (crate.type === 'pistol') {
+          let weapon = this.weapons[0];
+          weapon.totalAmmo += CONFIG.CRATE_AMMO.pistol;
+          this.outOfAmmoState.pistol = false;
+          if (weapon.ammo === 0 && !this.reloading) {
+            this.reloading = true;
+            this.reloadRemaining = weapon.reloadTime;
+            this.reloadStartTime = Date.now();
+          }
+        }
+      }
+    }
+    this.openCrateRequested = false;
+
+    // Enemy logic and collisions
+    for (let i = 0; i < this.enemies.length; i++) {
+      let e = this.enemies[i];
+      e.vx *= 0.86;
+      e.vy *= 0.86;
+      const dx = this.player.x - e.x, dy = this.player.y - e.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0) {
+        let approach = (dist > 50) ? 1 : 0.4;
+        let speed = e.speed * approach;
+        e.vx += (dx/dist) * speed * 0.12;
+        e.vy += (dy/dist) * speed * 0.12;
+      }
+
+      // Collide with other enemies (bouncy)
+      for (let j = i+1; j < this.enemies.length; j++) {
+        let e2 = this.enemies[j];
+        let ddx = e2.x - e.x;
+        let ddy = e2.y - e.y;
+        let ddist = Math.hypot(ddx, ddy);
+        let minDist = (e.size/2 + e2.size/2);
+        if (ddist < minDist && ddist > 0) {
+          let overlap = minDist - ddist;
+          let pushX = (ddx/ddist)*overlap/2;
+          let pushY = (ddy/ddist)*overlap/2;
+          e.x -= pushX;
+          e.y -= pushY;
+          e2.x += pushX;
+          e2.y += pushY;
+        }
+      }
+
+      // Collide with crates (bouncy)
+      for (let c = 0; c < this.crates.length; c++) {
+        let crate = this.crates[c];
+        if (crate.opened) continue;
+        let ddx = crate.x - e.x;
+        let ddy = crate.y - e.y;
+        let ddist = Math.hypot(ddx, ddy);
+        let minDist = (e.size/2 + crate.size/2);
+        if (ddist < minDist && ddist > 0) {
+          let overlap = minDist - ddist;
+          let pushX = (ddx/ddist)*overlap/2;
+          let pushY = (ddy/ddist)*overlap/2;
+          e.x -= pushX;
+          e.y -= pushY;
+          crate.x += pushX;
+          crate.y += pushY;
+        }
+      }
+
+      e.x += e.vx;
+      e.y += e.vy;
+
+      // Player collision
+      let minDistPlayer = (this.player.size/2 + e.size/2);
+      if (dist < minDistPlayer) {
+        if (!e.hitting) {
+          e.hitting = true;
+          e.hitAnimStart = Date.now();
+        }
+        let overlap = minDistPlayer - dist;
+        if (dist > 0) {
+          let pushX = (dx/dist) * overlap * 1.8;
+          let pushY = (dy/dist) * overlap * 1.8;
+          e.vx -= pushX * 0.06;
+          e.vy -= pushY * 0.06;
+          this.player.x += pushX * 0.013;
+          this.player.y += pushY * 0.013;
+        }
+        if (Date.now() - e.hitAnimStart > CONFIG.ENEMY_HIT_ANIMATION_TIME) {
+          this.player.health -= CONFIG.ENEMY_HIT_DAMAGE;
+          e.hitAnimStart = Date.now();
+          if (this.player.health <= 0) this.endGame();
+        }
+      } else {
+        e.hitting = false;
+      }
+
+      // Melee stick: push enemies that touch it (smaller stick)
+      if (this.weapons[this.currentWeapon].type === 'melee') {
+        const stick = this.weapons[2];
+        let stickAngle = Math.atan2(this.pointerY + this.viewY - this.player.y,this.pointerX + this.viewX - this.player.x);
+        let stickStartX = this.player.x + Math.cos(stickAngle) * (this.player.size/2);
+        let stickStartY = this.player.y + Math.sin(stickAngle) * (this.player.size/2);
+        let stickEndX = this.player.x + Math.cos(stickAngle) * (this.player.size/2 + stick.stickLength);
+        let stickEndY = this.player.y + Math.sin(stickAngle) * (this.player.size/2 + stick.stickLength);
+        let ex = e.x, ey = e.y;
+        let dxl = stickEndX - stickStartX;
+        let dyl = stickEndY - stickStartY;
+        let len = Math.hypot(dxl, dyl);
+        let t = ((ex - stickStartX)*dxl + (ey - stickStartY)*dyl) / (len*len);
+        t = clamp(t, 0, 1);
+        let closestX = stickStartX + dxl * t;
+        let closestY = stickStartY + dyl * t;
+        let stickDist = Math.hypot(ex - closestX, ey - closestY);
+        if (stickDist < e.size/2 + stick.stickWidth/2) {
+          let pushAngle = Math.atan2(ex - closestX, ey - closestY);
+          e.vx += Math.sin(pushAngle) * stick.knockback * 0.09;
+          e.vy += Math.cos(pushAngle) * stick.knockback * 0.09;
+          e.health -= stick.damage * 0.13;
+        }
+      }
+
+      e.hidden = (
+        e.x < this.viewX - e.size ||
+        e.x > this.viewX + this.viewW + e.size ||
+        e.y < this.viewY - e.size ||
+        e.y > this.viewY + this.viewH + e.size
+      );
+
+      if (e.health <= 0) {
+        this.enemies.splice(i,1);
+        this.kills++;
+        i--;
+      }
+    }
+
+    // Crate <-> crate collision
+    for (let i = 0; i < this.crates.length; i++) {
+      let crateA = this.crates[i];
+      if (crateA.opened) continue;
+      for (let j = i+1; j < this.crates.length; j++) {
+        let crateB = this.crates[j];
+        if (crateB.opened) continue;
+        let dx = crateB.x - crateA.x;
+        let dy = crateB.y - crateA.y;
+        let dist = Math.hypot(dx, dy);
+        let minDist = crateA.size/2 + crateB.size/2;
+        if (dist < minDist && dist > 0) {
+          let overlap = minDist - dist;
+          let pushX = (dx/dist)*overlap/2;
+          let pushY = (dy/dist)*overlap/2;
+          crateA.x -= pushX;
+          crateA.y -= pushY;
+          crateB.x += pushX;
+          crateB.y += pushY;
+        }
+      }
+    }
+    // Crate <-> enemy collision (already handled above)
+
+    this.zone.radius -= CONFIG.ZONE_SHRINK_RATE;
+    const distToZone = Math.hypot(this.player.x-this.zone.x, this.player.y-this.zone.y);
+    if (distToZone > this.zone.radius) {
+      const now = Date.now();
+      if (now - this.lastZoneDamage > 1000) {
+        this.player.health -= 5; this.lastZoneDamage = now;
+        if (this.player.health <= 0) this.endGame();
+      }
+    }
+
+    while (this.grassBlades.length < CONFIG.GRASS_BLADE_COUNT) {
+      this.grassBlades.push(new GrassBlade(
+        Math.random() * this.mapW,
+        Math.random() * this.mapH,
+        CONFIG.GRASS_LENGTH_MIN + Math.random() * (CONFIG.GRASS_LENGTH_MAX-CONFIG.GRASS_LENGTH_MIN),
+        Math.random() * Math.PI
+      ));
+    }
+  }
+
+  draw() {
+    const ctx = this.ctx;
+    ctx.clearRect(0,0,CONFIG.VIEW_W,CONFIG.VIEW_H);
+    ctx.save();
+    ctx.translate(-this.viewX, -this.viewY);
+
+    ctx.strokeStyle="#333";
+    ctx.lineWidth=10;
+    ctx.strokeRect(0,0,this.mapW,this.mapH);
+
+    ctx.strokeStyle='lime'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(this.zone.x,this.zone.y,this.zone.radius,0,Math.PI*2); ctx.stroke();
+
+    ctx.strokeStyle='green';
+    for (let g of this.grassBlades) {
+      ctx.beginPath(); ctx.moveTo(g.x,g.y);
+      ctx.lineTo(g.x+Math.cos(g.angle)*g.length,g.y-Math.sin(g.angle)*g.length);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle=this.player.color;
+    ctx.beginPath(); ctx.arc(this.player.x,this.player.y,this.player.size/2,0,Math.PI*2); ctx.fill();
+
+    const w = this.weapons[this.currentWeapon];
+    let angle = Math.atan2(this.pointerY + this.viewY - this.player.y,this.pointerX + this.viewX - this.player.x);
+    if (w.type==='gun') {
+      ctx.save(); ctx.translate(this.player.x,this.player.y); ctx.rotate(angle);
+      ctx.fillStyle=w.color;
+      ctx.fillRect(this.player.size/2, -w.gunWidth/2, w.gunLength, w.gunWidth);
+      ctx.restore();
+    }
+    if (w.type === 'melee') {
+      ctx.save();
+      ctx.translate(this.player.x, this.player.y);
+      ctx.rotate(angle);
+      ctx.fillStyle = w.color;
+      ctx.fillRect(this.player.size/2, -w.stickWidth/2, w.stickLength, w.stickWidth);
+      ctx.beginPath();
+      ctx.arc(this.player.size/2 + w.stickLength, 0, w.stickWidth/2, 0, Math.PI*2);
+      ctx.fillStyle = "#7c5a27";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (let b of this.bullets) {
+      if (b.visible) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'white';
+        ctx.shadowColor = 'white';
+        ctx.shadowBlur = 16;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    for (let e of this.enemies){
+      if (e.hidden) continue;
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      const speed = Math.hypot(e.vx, e.vy);
+      if (speed > 2) {
+        ctx.rotate(Math.sin(performance.now()/80+e.x+e.y)*0.08);
+        ctx.scale(1 + Math.min(speed/10,0.16), 1 - Math.min(speed/14,0.09));
+      }
+      if (e.hitting) {
+        let t = (Date.now() - e.hitAnimStart) / CONFIG.ENEMY_HIT_ANIMATION_TIME;
+        t = clamp(t, 0, 1);
+        ctx.save();
+        ctx.globalAlpha = 0.45 + 0.55 * Math.sin(Math.PI * t);
+        ctx.scale(1.01 + 0.3 * Math.sin(Math.PI * t), 1.01 - 0.15 * Math.sin(Math.PI * t));
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(0, 0, e.size/2+8, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.fillStyle=e.color;
+      ctx.beginPath(); ctx.arc(0,0,e.size/2,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='red'; ctx.fillRect(-e.size/2, -e.size/2-10, e.size, 5);
+      ctx.fillStyle='lime'; ctx.fillRect(-e.size/2, -e.size/2-10, e.size*(e.health/e.maxHealth), 5);
+      ctx.restore();
+    }
+
+    for (let crate of this.crates) {
+      if (crate.opened || crate.hidden) continue;
+      ctx.save();
+      ctx.translate(crate.x, crate.y);
+      ctx.fillStyle = crate.type === 'rifle' ? '#6077f2' : '#d2a84c';
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.rect(-crate.size/2, -crate.size/2, crate.size, crate.size);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = "15px Verdana";
+      ctx.fillStyle = "#fff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(crate.type === 'rifle' ? "R" : "P", 0, 0);
+      ctx.restore();
+
+      if (
+        Math.hypot(this.player.x-crate.x, this.player.y-crate.y) < this.player.size/2 + crate.size/2
+        && !crate.opened
+      ) {
+        ctx.save();
+        ctx.font = "18px Verdana";
+        ctx.fillStyle = "#ffb";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText("Press E to open", crate.x, crate.y+crate.size/2+5);
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
+
+    ctx.fillStyle='white'; ctx.font='20px Verdana';
+    ctx.fillText(`HP: ${this.player.health}`,10,20);
+    ctx.fillText(`Kills: ${this.kills}`,10,45);
+    ctx.fillText(`Zone: ${this.zone.radius.toFixed(1)}`,10,70);
+    ctx.fillText(`${this.weapons[this.currentWeapon].name}`,10,95);
+    if (this.weapons[this.currentWeapon].type==='gun') {
+      let weapon = this.weapons[this.currentWeapon];
+      if (this.reloading){
+        ctx.fillText(`Reloading...`,10,120);
+        let barX = 10, barY = 145, barW = 120, barH = 16;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = '#fff';
+        let reloadPct = 1 - Math.max(this.reloadRemaining,0)/weapon.reloadTime;
+        ctx.fillRect(barX, barY, barW*reloadPct, barH);
+        ctx.strokeStyle = '#eee';
+        ctx.strokeRect(barX, barY, barW, barH);
+        ctx.fillStyle = '#fff';
+        ctx.font = '16px Verdana';
+        ctx.fillText(`${(this.reloadRemaining/1000).toFixed(2)}s`, barX+barW+8, barY+barH-3);
+      } else if (weapon.totalAmmo > 0) {
+        ctx.fillText(`Ammo: ${weapon.ammo}/${weapon.magSize} | Reserve: ${weapon.totalAmmo}`,10,120);
+      } else {
+        ctx.fillText(`Ammo: ${weapon.ammo}/${weapon.magSize} | Reserve: 0`,10,120);
+        ctx.fillStyle = '#ffb';
+        ctx.font = '18px Verdana';
+        ctx.fillText("Find crates for more ammo!",10,170);
+      }
+    }
+    if (!this.running && this.player.health <= 0) {
+      ctx.fillStyle='white'; ctx.font='50px Verdana';
+      ctx.fillText("Game Over",220,300);
+      ctx.fillText("Total Kills: "+this.kills,220,360);
+    }
+  }
+
+  gameLoop() {
+    if (!this.running) return;
+    const now = performance.now();
+    const delta = clamp((now - this.lastFrameTime), 0, 50);
+    this.lastFrameTime = now;
+    if (!this.paused) {
+      this.update(delta);
+      this.draw();
+      if (this.player.health > 0) {
+        requestAnimationFrame(()=>this.gameLoop());
+      }
+    }
+  }
+}
 
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
-
-// Input state
-const keys = {};
-let mouseDown = false;
-let paused = false;
-
-// Movement / aiming
-let moving = false;
-let moveTarget = null;
-let pointerX = canvas.width/2, pointerY = canvas.height/2;
-
-// Double tap detection
-let lastTapTime = 0;
-
-// UI
 const pauseBtn = document.getElementById('pauseBtn');
+let game = new Game(canvas, ctx);
+
 pauseBtn.addEventListener('click', () => {
-  paused = !paused;
-  pauseBtn.textContent = paused ? '▶️' : '⏸️';
-  if (!paused) startSpawning();
-  else clearInterval(spawnInterval);
+  game.paused = !game.paused;
+  pauseBtn.textContent = game.paused ? '▶️' : '⏸️';
+  if (game.paused) game.pause();
+  else game.resume();
 });
 
-// Player / game state
-const player = { x:400, y:300, size:20, color:'teal', speed:3, health:100 };
-const bullets = [], muzzleFlashes = [], enemies = [];
-let kills = 0;
-let zoneX = 400, zoneY = 300, zoneRadius = 300;
-let grassBlades = [];
+document.addEventListener('keydown', e => {
+  game.keys[e.key] = true;
+  if (!game.reloading) {
+    if (e.key === '1') game.currentWeapon = 0;
+    if (e.key === '2') game.currentWeapon = 1;
+    if (e.key === '3') game.currentWeapon = 2;
+  }
+  if (e.key === 'e' || e.key === 'E') {
+    game.openCrateRequested = true;
+  }
+});
+document.addEventListener('keyup', e => {
+  game.keys[e.key] = false;
+});
 
-// Weapons
-const weapons = [
-  { name:'Pistol', damage:40, fireRate:400, automatic:false, gunLength:15, gunWidth:5, color:'#999', recoil:2, type:'gun', magSize:6, ammo:6, reloadTime:1500, bulletSpeed:7 },
-  { name:'Rifle',  damage:10, fireRate:120, automatic:true,  gunLength:25, gunWidth:5, color:'#8B4513', recoil:1, type:'gun', magSize:20, ammo:20, reloadTime:2500, bulletSpeed:9 },
-  { name:'Melee',  damage:8,  fireRate:200, automatic:false, range:40, knockback:12, color:'#f39c12', type:'melee' }
-];
-let currentWeapon = 0, lastShotTime = 0, reloading = false, reloadStartTime = 0, reloadRemaining = 0;
-let meleeSwing = null;
-
-// Input — keyboard
-document.addEventListener('keydown', e => keys[e.key] = true);
-document.addEventListener('keyup', e => keys[e.key] = false);
-
-// Mouse input
 canvas.addEventListener("mousemove", e => {
   const rect = canvas.getBoundingClientRect();
-  pointerX = e.clientX - rect.left;
-  pointerY = e.clientY - rect.top;
+  game.pointerX = e.clientX - rect.left;
+  game.pointerY = e.clientY - rect.top;
 });
-canvas.addEventListener("mousedown", e => { mouseDown = true; handleTap(e.clientX, e.clientY); });
-canvas.addEventListener("mouseup", () => mouseDown = false);
-
-// Touch input
-canvas.addEventListener("touchstart", e => {
-  e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const x = e.changedTouches[0].clientX - rect.left;
-  const y = e.changedTouches[0].clientY - rect.top;
-  mouseDown = true;
-  pointerX = x; pointerY = y;
-  handleTap(x, y);
-}, { passive: false });
-
-canvas.addEventListener("touchmove", e => {
-  e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const x = e.changedTouches[0].clientX - rect.left;
-  const y = e.changedTouches[0].clientY - rect.top;
-  pointerX = x; pointerY = y;
-}, { passive: false });
-
-canvas.addEventListener("touchend", () => { mouseDown = false; }, { passive: false });
-
-// Double/single tap
-function handleTap(x, y) {
-  const now = Date.now();
-  const timeSinceLast = now - lastTapTime;
-
-  if (timeSinceLast < 300) {
-    moving = !moving;
-    moveTarget = moving ? { x, y } : null;
-  } else {
-    attack();
-  }
-  lastTapTime = now;
-}
-
-// Weapon buttons
-document.querySelectorAll(".weapon-buttons button").forEach(btn=>{
-  btn.addEventListener("click", ()=> {
-    currentWeapon = parseInt(btn.dataset.weapon);
-  });
+canvas.addEventListener("mousedown", e => {
+  game.mouseDown = true;
+  game.attack();
 });
+canvas.addEventListener("mouseup", () => { game.mouseDown = false; });
 
-// Enemies
-let spawnInterval;
-function spawnEnemy(){
-  if(paused) return;
-  const x = Math.random() * canvas.width, y = Math.random() * canvas.height;
-  const speed = 0.6 + Math.random()*0.4, size = 20, health = 50;
-  enemies.push({ x, y, size, color:'crimson', speed, health, maxHealth:health, dx:0, dy:0 });
-}
-function startSpawning(){ spawnInterval = setInterval(spawnEnemy, 3000); }
-startSpawning();
+game.start();
 
-// Attack
-function attack(){
-  if (paused || reloading) return;
-  const now = Date.now();
-  const weapon = weapons[currentWeapon];
-  if (now - lastShotTime < weapon.fireRate) return;
-  if (weapon.type === 'gun' && weapon.ammo <= 0) return;
-  lastShotTime = now;
-
-  const angle = Math.atan2(pointerY - player.y, pointerX - player.x);
-
-  if (weapon.type === 'gun') {
-    const barrelX = player.x + Math.cos(angle) * (player.size/2 + weapon.gunLength);
-    const barrelY = player.y + Math.sin(angle) * (player.size/2 + weapon.gunLength);
-    bullets.push({ x: barrelX, y: barrelY, dx: Math.cos(angle) * weapon.bulletSpeed, dy: Math.sin(angle) * weapon.bulletSpeed, damage:weapon.damage, angle:angle });
-    player.x -= Math.cos(angle) * weapon.recoil;
-    player.y -= Math.sin(angle) * weapon.recoil;
-    muzzleFlashes.push({ x: barrelX, y: barrelY, angle: angle, size: 12, created: Date.now() });
-    weapon.ammo--;
-    if (weapon.ammo <= 0) {
-      reloading = true;
-      reloadRemaining = weapon.reloadTime;
-      reloadStartTime = Date.now();
-    }
-  } else if (weapon.type === 'melee') {
-    meleeSwing = { start: Date.now(), duration: weapon.fireRate, baseAngle: angle };
-  }
-}
-
-function handleAuto(){
-  if (mouseDown && weapons[currentWeapon].automatic && !paused && !reloading) {
-    attack();
-  }
-}
-
-// Update
-let lastZoneDamage = Date.now();
-function update(){
-  if (paused) return;
-
-  // Reload
-  if (reloading) {
-    const weapon = weapons[currentWeapon];
-    const now = Date.now();
-    reloadRemaining -= now - reloadStartTime;
-    reloadStartTime = now;
-    if (reloadRemaining <= 0) {
-      weapon.ammo = weapon.magSize;
-      reloading = false;
-      reloadRemaining = 0;
-    }
-  }
-
-  // Keyboard move
-  if (keys['w']) player.y -= player.speed;
-  if (keys['s']) player.y += player.speed;
-  if (keys['a']) player.x -= player.speed;
-  if (keys['d']) player.x += player.speed;
-
-  // Double-tap move
-  if (moving && moveTarget) {
-    const dx = moveTarget.x - player.x;
-    const dy = moveTarget.y - player.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > 2) {
-      player.x += (dx / dist) * player.speed;
-      player.y += (dy / dist) * player.speed;
-    }
-  }
-
-  handleAuto();
-
-  // Bullets
-  for (let i=bullets.length-1; i>=0; i--){
-    let b = bullets[i];
-    b.x += b.dx; b.y += b.dy;
-    if (b.x<0||b.x>canvas.width||b.y<0||b.y>canvas.height){ bullets.splice(i,1); continue; }
-    for (let j=enemies.length-1; j>=0; j--){
-      let e = enemies[j];
-      if (Math.hypot(b.x-e.x, b.y-e.y) < e.size/2){
-        e.health -= b.damage; bullets.splice(i,1);
-        if (e.health<=0){ enemies.splice(j,1); kills++; }
-        break;
-      }
-    }
-  }
-
-  // Enemies follow player
-  for (let e of enemies){
-    const dx = player.x - e.x, dy = player.y - e.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist>0){ e.dx=(dx/dist)*e.speed; e.dy=(dy/dist)*e.speed; e.x+=e.dx; e.y+=e.dy; }
-    if (dist<player.size/2+e.size/2){ player.health--; if(player.health<=0) endGame(); }
-  }
-
-  // Zone shrink
-  zoneRadius -= 0.01;
-  const distToZone = Math.hypot(player.x-zoneX, player.y-zoneY);
-  if (distToZone>zoneRadius){
-    const now = Date.now();
-    if (now - lastZoneDamage > 1000){
-      player.health -= 5; lastZoneDamage=now;
-      if(player.health<=0) endGame();
-    }
-  }
-
-  // Melee
-  if (meleeSwing){
-    const weapon = weapons[2];
-    const elapsed = Date.now()-meleeSwing.start;
-    if (elapsed<meleeSwing.duration){
-      for (let i=enemies.length-1; i>=0; i--){
-        let e = enemies[i];
-        const dx=e.x-player.x, dy=e.y-player.y;
-        const dist=Math.hypot(dx,dy);
-        if (dist<weapon.range+e.size/2){
-          e.health-=weapon.damage;
-          e.x+=(dx/dist)*weapon.knockback; e.y+=(dy/dist)*weapon.knockback;
-          if (e.health<=0){ enemies.splice(i,1); kills++; }
-        }
-      }
-    } else meleeSwing=null;
-  }
-
-  // Grass blades
-  if(grassBlades.length<40){
-    grassBlades.push({x:Math.random()*canvas.width,y:Math.random()*canvas.height,length:10+Math.random()*10,angle:Math.random()*Math.PI});
-  }
-}
-
-// Draw
-function draw(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-
-  // Zone
-  ctx.strokeStyle='lime'; ctx.lineWidth=2;
-  ctx.beginPath(); ctx.arc(zoneX,zoneY,zoneRadius,0,Math.PI*2); ctx.stroke();
-
-  // Grass
-  ctx.strokeStyle='green';
-  for (let g of grassBlades){
-    ctx.beginPath(); ctx.moveTo(g.x,g.y);
-    ctx.lineTo(g.x+Math.cos(g.angle)*g.length,g.y-Math.sin(g.angle)*g.length);
-    ctx.stroke();
-  }
-
-  // Player
-  ctx.fillStyle=player.color;
-  ctx.beginPath(); ctx.arc(player.x,player.y,player.size/2,0,Math.PI*2); ctx.fill();
-
-  // Gun
-  const w = weapons[currentWeapon];
-  if (w.type==='gun'){
-    const angle = Math.atan2(pointerY-player.y,pointerX-player.x);
-    ctx.save(); ctx.translate(player.x,player.y); ctx.rotate(angle);
-    ctx.fillStyle=w.color;
-    ctx.fillRect(player.size/2, -w.gunWidth/2, w.gunLength, w.gunWidth);
-    ctx.restore();
-  }
-
-  // Bullets
-  ctx.fillStyle='yellow';
-  for (let b of bullets){ ctx.beginPath(); ctx.arc(b.x,b.y,3,0,Math.PI*2); ctx.fill(); }
-
-  // Enemies
-  for (let e of enemies){
-    ctx.fillStyle=e.color;
-    ctx.beginPath(); ctx.arc(e.x,e.y,e.size/2,0,Math.PI*2); ctx.fill();
-    ctx.fillStyle='red'; ctx.fillRect(e.x-e.size/2, e.y-e.size/2-10, e.size, 5);
-    ctx.fillStyle='lime'; ctx.fillRect(e.x-e.size/2, e.y-e.size/2-10, e.size*(e.health/e.maxHealth), 5);
-  }
-
-  // HUD
-  ctx.fillStyle='white'; ctx.font='20px Verdana';
-  ctx.fillText(`HP: ${player.health}`,10,20);
-  ctx.fillText(`Kills: ${kills}`,10,45);
-  ctx.fillText(`Zone: ${zoneRadius.toFixed(1)}`,10,70);
-  ctx.fillText(`${weapons[currentWeapon].name}`,10,95);
-  if (weapons[currentWeapon].type==='gun'){
-    if (reloading){
-      ctx.fillText(`Reloading...`,10,120);
-    } else {
-      ctx.fillText(`Ammo: ${weapons[currentWeapon].ammo}/${weapons[currentWeapon].magSize}`,10,120);
-    }
-  }
-}
-
-function gameLoop(){
-  update(); draw();
-  if(player.health>0){ requestAnimationFrame(gameLoop); }
-  else{
-    ctx.fillStyle='white'; ctx.font='50px Verdana';
-    ctx.fillText("Game Over",220,300);
-    ctx.fillText("Total Kills: "+kills,220,360);
-    showRestartButton();
-  }
-}
-
-// Restart
-function showRestartButton(){
-  let btn=document.createElement("button");
-  btn.id="restartBtn"; btn.textContent="Restart";
-  btn.style.left=(canvas.width/2-60)+"px";
-  btn.style.top=(canvas.height/2+50)+"px";
-  document.getElementById("game-container").appendChild(btn);
-  btn.addEventListener("click",()=>location.reload());
-}
-function endGame(){ clearInterval(spawnInterval); player.health=0; }
-
-gameLoop();
 </script>
 </body>
 </html>
-
