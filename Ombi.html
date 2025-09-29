@@ -3,16 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <title>Ombi</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <style>
 html, body {
   margin:0; padding:0; height:100%;
   display:flex; justify-content:center; align-items:center;
   background:#111; font-family:Verdana, sans-serif; color:white;
   overflow:hidden;
+  touch-action: none; /* Prevent unwanted browser scrolling/zooming */
 }
 #game-container { position: relative; }
 canvas { display:block; border:2px solid #444; }
 
+/* Control Buttons (Desktop/Mouse) */
 #pauseBtn {
   position:absolute; top:10px; right:10px;
   background:rgba(0,0,0,0.5); border:none; color:white;
@@ -21,6 +24,15 @@ canvas { display:block; border:2px solid #444; }
 }
 #pauseBtn:hover { background: rgba(255,255,255,0.2); }
 
+#mobileToggleBtn { /* New button for toggling mobile view */
+  position:absolute; top:10px; right:65px;
+  background:rgba(0,0,0,0.5); border:none; color:white;
+  font-size:14px; padding:8px 12px; cursor:pointer;
+  border-radius:5px; z-index:10;
+}
+#mobileToggleBtn:hover { background: rgba(255,255,255,0.2); }
+
+
 #restartBtn {
   position:absolute;
   background:rgba(0,0,0,0.6);
@@ -28,12 +40,133 @@ canvas { display:block; border:2px solid #444; }
   padding:10px 20px; font-size:22px; cursor:pointer; z-index:20;
 }
 #restartBtn:hover { background: rgba(255,255,255,0.2); }
+
+/* --- Touchscreen Controls --- */
+.touch-control {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* Joystick (Movement) */
+#joystick-container {
+  bottom: 20px;
+  left: 20px;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+}
+#joystick-handle {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.6);
+  transform: translate(0, 0); /* Moved by touch */
+  transition: transform 0.1s ease-out; /* Smooth reset */
+}
+
+/* Fire/Action Button */
+#fire-button {
+  bottom: 40px;
+  right: 40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: crimson;
+  border: 4px solid #fff;
+  font-size: 30px;
+  color: white;
+  opacity: 0.8;
+}
+#fire-button:active { opacity: 1.0; background: red; } /* Feedback on touch */
+
+/* Weapon Switch/Reload Buttons */
+#weapon-switch-btn {
+  top: 10px;
+  left: 10px;
+  width: 80px;
+  height: 40px;
+  background: rgba(0,0,0,0.5);
+  border: none;
+  color: white;
+  font-size: 18px;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 5px;
+}
+#weapon-switch-btn:active { background: rgba(255,255,255,0.2); }
+
+#reload-btn {
+  top: 60px;
+  left: 10px;
+  width: 80px;
+  height: 40px;
+  background: rgba(0,0,0,0.5);
+  border: none;
+  color: white;
+  font-size: 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 5px;
+}
+#reload-btn:active { background: rgba(255,255,255,0.2); }
+
+#action-btn {
+  bottom: 40px;
+  right: 140px;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: #333;
+  border: 2px solid #fff;
+  font-size: 20px;
+  color: white;
+  opacity: 0.8;
+  display: none; /* Only show when near a crate */
+}
+#action-btn:active { background: #555; }
+
+/* Initial state: Touch controls are hidden on large screens
+  The .mobile-mode class will be toggled by the new button to override this. 
+*/
+#joystick-container, #fire-button, #weapon-switch-btn, #reload-btn, #action-btn { display: none; }
+
+/* Show touch controls on small screens OR when the 'mobile-mode' class is active */
+@media (max-width: 820px) {
+  #joystick-container, #fire-button, #weapon-switch-btn, #reload-btn { display: flex; }
+  /* Action button visibility is handled in JS based on proximity, but needs to be 'flex' on mobile */
+  #action-btn { display: flex; opacity: 0; } /* Set initial opacity to 0, JS will control visibility/opacity */
+}
+
+/* Override for manual toggle: If the container has 'mobile-mode', show the controls */
+.mobile-mode #joystick-container,
+.mobile-mode #fire-button,
+.mobile-mode #weapon-switch-btn,
+.mobile-mode #reload-btn { 
+    display: flex; 
+}
+.mobile-mode #action-btn {
+  /* Action button still relies on JS visibility but needs 'flex' when toggled */
+  display: flex;
+}
 </style>
 </head>
 <body>
 <div id="game-container">
   <canvas id="game" width="800" height="600" aria-label="Game canvas" tabindex="0"></canvas>
-  <button id="pauseBtn">⏸️</button>
+  <button id="mobileToggleBtn">Mobile On</button> <button id="pauseBtn">⏸️</button>
+
+  <div id="joystick-container" class="touch-control">
+    <div id="joystick-handle"></div>
+  </div>
+  <button id="fire-button" class="touch-control">FIRE</button>
+  <button id="weapon-switch-btn" class="touch-control">Switch</button>
+  <button id="reload-btn" class="touch-control">Reload</button>
+  <button id="action-btn" class="touch-control">E</button>
+
 </div>
 <script>
 const CONFIG = {
@@ -136,6 +269,17 @@ class Game {
     this.viewY = 0;
     this.outOfAmmoState = { pistol: false, rifle: false };
     this.openCrateRequested = false;
+
+    // --- Touch/Mobile Control State ---
+    this.touchMoveActive = false;
+    this.touchMoveStart = { x: 0, y: 0 };
+    this.touchMoveCurrent = { x: 0, y: 0 };
+    this.touchFireActive = false; // Used for both mouse and touch fire on mobile controls
+    this.joystickHandle = document.getElementById('joystick-handle');
+    this.joystickContainer = document.getElementById('joystick-container');
+    this.actionBtn = document.getElementById('action-btn');
+    this.fireBtn = document.getElementById('fire-button');
+    this.isDesktopClickActive = false; // NEW: Track if a mouse click is holding down a mobile control
   }
 
   start() {
@@ -163,9 +307,13 @@ class Game {
     this.grassBlades = [];
     this.lastZoneDamage = Date.now();
     this.keys = {};
-    this.mouseDown = false;
+    this.mouseDown = false; // Desktop/Canvas fire
+    this.isDesktopClickActive = false; // Mobile control mouse emulation
     this.outOfAmmoState = { pistol: false, rifle: false };
     this.openCrateRequested = false;
+    this.touchMoveActive = false;
+    this.touchFireActive = false;
+    this.joystickHandle.style.transform = `translate(0px, 0px)`;
     clearInterval(this.spawnTimer);
     this.spawnTimer = setInterval(() => this.spawnEnemy(), CONFIG.ENEMY_SPAWN_INTERVAL);
     this.removeRestartBtn();
@@ -226,10 +374,27 @@ class Game {
   }
 
   handleInput() {
+    // Keyboard input
     if (this.keys['w']) this.player.y -= this.player.speed;
     if (this.keys['s']) this.player.y += this.player.speed;
     if (this.keys['a']) this.player.x -= this.player.speed;
     if (this.keys['d']) this.player.x += this.player.speed;
+
+    // Joystick input (Touch or Mouse emulation)
+    if (this.touchMoveActive) {
+      const dx = this.touchMoveCurrent.x - this.touchMoveStart.x;
+      const dy = this.touchMoveCurrent.y - this.touchMoveStart.y;
+      const dist = Math.hypot(dx, dy);
+      const maxDist = 40;
+      
+      if (dist > 5) { // Deadzone
+        const angle = Math.atan2(dy, dx);
+        const effectiveSpeed = this.player.speed * Math.min(1, dist / maxDist);
+        this.player.x += Math.cos(angle) * effectiveSpeed;
+        this.player.y += Math.sin(angle) * effectiveSpeed;
+      }
+    }
+
     this.player.x = clamp(this.player.x, this.player.size/2, this.mapW-this.player.size/2);
     this.player.y = clamp(this.player.y, this.player.size/2, this.mapH-this.player.size/2);
   }
@@ -296,7 +461,9 @@ class Game {
   }
 
   handleAuto() {
-    if (this.mouseDown && this.weapons[this.currentWeapon].automatic && !this.paused && !this.reloading && this.running) {
+    // Fire if: Mouse down on canvas OR Mobile fire button is active (touch OR mouse emulation)
+    const isFiring = this.mouseDown || this.touchFireActive;
+    if (isFiring && this.weapons[this.currentWeapon].automatic && !this.paused && !this.reloading && this.running) {
       this.attack();
     }
   }
@@ -334,6 +501,7 @@ class Game {
     this.handleInput();
     this.handleAuto();
 
+    let crateProximity = false;
     // Bullets
     for (let i = this.bullets.length-1; i >= 0; i--) {
       let b = this.bullets[i];
@@ -355,7 +523,7 @@ class Game {
       }
     }
 
-    // Crate pickup (open with E while touching)
+    // Crate pickup (open with E/Action button while touching)
     for (let i = 0; i < this.crates.length; i++) {
       let crate = this.crates[i];
       crate.hidden = (
@@ -364,26 +532,23 @@ class Game {
         crate.y < this.viewY - crate.size ||
         crate.y > this.viewY + this.viewH + crate.size
       );
-      // Player must press "E" while touching to open
-      if (!crate.opened && !crate.hidden &&
-        Math.hypot(this.player.x-crate.x, this.player.y-crate.y) < this.player.size/2 + crate.size/2
-        && this.openCrateRequested
-      ) {
+      
+      const isTouching = Math.hypot(this.player.x-crate.x, this.player.y-crate.y) < this.player.size/2 + crate.size/2;
+
+      // Show action button on mobile if near a crate
+      if (isTouching && !crate.opened) {
+        crateProximity = true;
+      }
+
+      if (!crate.opened && !crate.hidden && isTouching && this.openCrateRequested) {
         crate.opened = true;
-        if (crate.type === 'rifle') {
-          let weapon = this.weapons[1];
-          weapon.totalAmmo += CONFIG.CRATE_AMMO.rifle;
-          this.outOfAmmoState.rifle = false;
-          if (weapon.ammo === 0 && !this.reloading) {
-            this.reloading = true;
-            this.reloadRemaining = weapon.reloadTime;
-            this.reloadStartTime = Date.now();
-          }
-        }
-        if (crate.type === 'pistol') {
-          let weapon = this.weapons[0];
-          weapon.totalAmmo += CONFIG.CRATE_AMMO.pistol;
-          this.outOfAmmoState.pistol = false;
+        let weaponIndex = -1;
+        if (crate.type === 'rifle') { weaponIndex = 1; this.outOfAmmoState.rifle = false; }
+        if (crate.type === 'pistol') { weaponIndex = 0; this.outOfAmmoState.pistol = false; }
+        
+        if (weaponIndex !== -1) {
+          let weapon = this.weapons[weaponIndex];
+          weapon.totalAmmo += CONFIG.CRATE_AMMO[crate.type];
           if (weapon.ammo === 0 && !this.reloading) {
             this.reloading = true;
             this.reloadRemaining = weapon.reloadTime;
@@ -393,6 +558,26 @@ class Game {
       }
     }
     this.openCrateRequested = false;
+
+    // Control visibility of action button
+    // This logic only applies if the game is in a mobile-control state (small screen OR toggle active)
+    const isMobileControlEnabled = window.innerWidth <= 820 || document.getElementById('game-container').classList.contains('mobile-mode');
+
+    if (isMobileControlEnabled) {
+      if (crateProximity) {
+        this.actionBtn.style.display = 'flex';
+        this.actionBtn.style.opacity = '0.8';
+      } else {
+        this.actionBtn.style.opacity = '0';
+        // Use a timeout to hide the element completely after a delay, prevents flicker
+        if (parseFloat(this.actionBtn.style.opacity) === 0) {
+          setTimeout(() => { if (parseFloat(this.actionBtn.style.opacity) === 0) this.actionBtn.style.display = 'none'; }, 200);
+        }
+      }
+    } else {
+       this.actionBtn.style.display = 'none';
+    }
+
 
     // Enemy logic and collisions
     for (let i = 0; i < this.enemies.length; i++) {
@@ -668,7 +853,15 @@ class Game {
         ctx.fillStyle = "#ffb";
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        ctx.fillText("Press E to open", crate.x, crate.y+crate.size/2+5);
+        
+        // Check if mobile controls are active (either small screen OR manually toggled)
+        const isMobileControlActive = window.innerWidth <= 820 || document.getElementById('game-container').classList.contains('mobile-mode');
+
+        if (!isMobileControlActive) {
+           ctx.fillText("Press E to open", crate.x, crate.y+crate.size/2+5);
+        } else {
+           ctx.fillText("Press Action button", crate.x, crate.y+crate.size/2+5);
+        }
         ctx.restore();
       }
     }
@@ -729,7 +922,17 @@ class Game {
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const pauseBtn = document.getElementById('pauseBtn');
+const mobileToggleBtn = document.getElementById('mobileToggleBtn');
+const fireBtn = document.getElementById('fire-button');
+const switchBtn = document.getElementById('weapon-switch-btn');
+const reloadBtn = document.getElementById('reload-btn');
+const actionBtn = document.getElementById('action-btn');
+const joystickContainer = document.getElementById('joystick-container');
+const joystickHandle = document.getElementById('joystick-handle');
+const gameContainer = document.getElementById('game-container');
 let game = new Game(canvas, ctx);
+
+// --- Button Handlers ---
 
 pauseBtn.addEventListener('click', () => {
   game.paused = !game.paused;
@@ -738,7 +941,69 @@ pauseBtn.addEventListener('click', () => {
   else game.resume();
 });
 
+// NEW: Mobile Toggle Button Logic
+mobileToggleBtn.addEventListener('click', () => {
+    const isMobileMode = gameContainer.classList.toggle('mobile-mode');
+    mobileToggleBtn.textContent = isMobileMode ? 'Mobile Off' : 'Mobile On';
+});
+
+// Helper function to handle button presses for both touch and mouse
+function handleButtonPress(btn) {
+  if (game.paused) return;
+  switch (btn) {
+    case 'fire':
+      game.touchFireActive = true;
+      game.attack();
+      break;
+    case 'switch':
+      game.currentWeapon = (game.currentWeapon + 1) % game.weapons.length;
+      break;
+    case 'reload':
+      if (game.reloading) return;
+      const weapon = game.weapons[game.currentWeapon];
+      if (weapon.type === 'gun' && weapon.ammo < weapon.magSize && weapon.totalAmmo > 0) {
+        game.reloading = true;
+        game.reloadRemaining = weapon.reloadTime;
+        game.reloadStartTime = Date.now();
+      }
+      break;
+    case 'action':
+      game.openCrateRequested = true;
+      break;
+  }
+}
+
+// Helper function to handle button releases (mainly for auto-fire)
+function handleButtonRelease(btn) {
+  if (btn === 'fire') {
+    game.touchFireActive = false;
+  }
+}
+
+// --- Fire Button (Touch & Mouse) ---
+// Touch
+fireBtn.addEventListener('touchstart', e => { e.preventDefault(); handleButtonPress('fire'); }, { passive: false });
+fireBtn.addEventListener('touchend', () => { handleButtonRelease('fire'); });
+// Mouse emulation (NEW)
+fireBtn.addEventListener('mousedown', e => { e.preventDefault(); handleButtonPress('fire'); });
+fireBtn.addEventListener('mouseup', () => { handleButtonRelease('fire'); });
+
+// --- Weapon Switch Button (Touch & Mouse) ---
+// Touch is handled by 'click' which triggers after touchend
+switchBtn.addEventListener('click', () => { handleButtonPress('switch'); });
+
+// --- Reload Button (Touch & Mouse) ---
+// Touch is handled by 'click' which triggers after touchend
+reloadBtn.addEventListener('click', () => { handleButtonPress('reload'); });
+
+// --- Action/Open Crate Button (Touch & Mouse) ---
+// Touch is handled by 'click' which triggers after touchend
+actionBtn.addEventListener('click', () => { handleButtonPress('action'); });
+
+
+// --- Desktop Input ---
 document.addEventListener('keydown', e => {
+  if (game.paused) return;
   game.keys[e.key] = true;
   if (!game.reloading) {
     if (e.key === '1') game.currentWeapon = 0;
@@ -750,19 +1015,204 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('keyup', e => {
+  if (game.paused) return;
   game.keys[e.key] = false;
 });
 
+// Canvas Mouse Input for aiming/firing
 canvas.addEventListener("mousemove", e => {
+  if (game.paused) return;
   const rect = canvas.getBoundingClientRect();
   game.pointerX = e.clientX - rect.left;
   game.pointerY = e.clientY - rect.top;
 });
 canvas.addEventListener("mousedown", e => {
-  game.mouseDown = true;
+  if (game.paused) return;
+  game.mouseDown = true; // Use game.mouseDown for desktop fire
   game.attack();
 });
 canvas.addEventListener("mouseup", () => { game.mouseDown = false; });
+
+
+// --- Joystick Functions ---
+const MAX_JOYSTICK_DIST = 40;
+
+function updateAimFromTouch(touch) {
+    if (!touch || game.paused) return;
+    const rect = canvas.getBoundingClientRect();
+    game.pointerX = touch.clientX - rect.left;
+    game.pointerY = touch.clientY - rect.top;
+}
+
+function getCenterAndCurrent(e) {
+  const rect = joystickContainer.getBoundingClientRect();
+  const centerX = rect.width / 2;
+  const centerY = rect.height / 2;
+  let currentX, currentY;
+  
+  if (e.touches && e.touches.length > 0) {
+    // Touch event
+    let touch;
+    for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        if (t.target === joystickContainer || t.target === joystickHandle) {
+            touch = t;
+            break;
+        }
+    }
+    if (!touch) return null;
+    currentX = touch.clientX - rect.left;
+    currentY = touch.clientY - rect.top;
+  } else {
+    // Mouse event
+    currentX = e.clientX - rect.left;
+    currentY = e.clientY - rect.top;
+  }
+  
+  return { centerX, centerY, currentX, currentY };
+}
+
+function handleJoystickMove(e) {
+  const coords = getCenterAndCurrent(e);
+  if (!coords) return;
+  const { centerX, centerY, currentX, currentY } = coords;
+
+  const dx = currentX - centerX;
+  const dy = currentY - centerY;
+  const dist = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  
+  const clampDist = Math.min(dist, MAX_JOYSTICK_DIST);
+  
+  const finalX = Math.cos(angle) * clampDist;
+  const finalY = Math.sin(angle) * clampDist;
+  
+  // Update game state for movement
+  game.touchMoveCurrent.x = currentX;
+  game.touchMoveCurrent.y = currentY;
+  
+  // Update handle position
+  joystickHandle.style.transform = `translate(${finalX}px, ${finalY}px)`;
+}
+
+function handleJoystickStart(e) {
+    if (game.paused) return;
+    e.preventDefault();
+    game.touchMoveActive = true;
+    
+    // Determine the starting point (touch or mouse)
+    const rect = joystickContainer.getBoundingClientRect();
+    if (e.touches && e.touches.length > 0) {
+        game.touchMoveStart.x = e.touches[0].clientX - rect.left;
+        game.touchMoveStart.y = e.touches[0].clientY - rect.top;
+    } else {
+        game.isDesktopClickActive = true; // NEW: Flag for mouse emulation
+        game.touchMoveStart.x = e.clientX - rect.left;
+        game.touchMoveStart.y = e.clientY - rect.top;
+    }
+
+    handleJoystickMove(e);
+}
+
+function handleJoystickEnd(e) {
+    // If it's a touchend event, check for remaining touches
+    if (e.type === 'touchend') {
+      let activeJoystickTouch = false;
+      for (let i = 0; i < e.touches.length; i++) {
+        if (e.touches[i].target === joystickContainer || e.touches[i].target === joystickHandle) {
+          activeJoystickTouch = true;
+          break;
+        }
+      }
+      if (activeJoystickTouch) return; // Keep joystick active if another touch is still holding it down
+    }
+
+    // If it's a mouseup event, check the flag
+    if (e.type === 'mouseup' && !game.isDesktopClickActive) return;
+    
+    // Reset state
+    game.touchMoveActive = false;
+    game.isDesktopClickActive = false; // NEW: Reset mouse flag
+    joystickHandle.style.transform = `translate(0px, 0px)`;
+}
+
+
+// --- Joystick Event Listeners (Combined Touch & Mouse) ---
+
+// Start (Touch & Mouse)
+joystickContainer.addEventListener('touchstart', handleJoystickStart, { passive: false });
+joystickContainer.addEventListener('mousedown', handleJoystickStart);
+
+// Move (Touch & Mouse)
+joystickContainer.addEventListener('touchmove', e => { e.preventDefault(); handleJoystickMove(e); }, { passive: false });
+// NOTE: Mouse movement needs to be tracked on the whole document when the click is held down
+document.addEventListener('mousemove', e => { 
+    if (game.touchMoveActive && game.isDesktopClickActive) {
+      handleJoystickMove(e);
+    }
+});
+
+// End (Touch & Mouse)
+joystickContainer.addEventListener('touchend', handleJoystickEnd);
+document.addEventListener('mouseup', handleJoystickEnd);
+
+
+// --- Canvas Aiming (Touch only - Mouse is handled by canvas listeners) ---
+
+canvas.addEventListener('touchstart', e => {
+    if (game.paused) return;
+    e.preventDefault();
+    
+    // Use the first touch that is NOT a control to set the aiming point
+    let aimTouch = null;
+    for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        const target = t.target;
+        if (!target.classList.contains('touch-control')) {
+            aimTouch = t;
+            break;
+        }
+    }
+    
+    if (aimTouch) {
+        updateAimFromTouch(aimTouch);
+    } 
+
+    // Two-finger touch to fire (simple two-finger gesture)
+    if (e.touches.length === 2 && !game.touchMoveActive) {
+      game.touchFireActive = true;
+      game.attack();
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+    if (game.paused) return;
+    e.preventDefault();
+
+    // Aiming update from the touch that is NOT a control
+    let aimTouch = null;
+    for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        const target = t.target;
+        if (!target.classList.contains('touch-control')) {
+            aimTouch = t;
+            break;
+        }
+    }
+    if (aimTouch) {
+      updateAimFromTouch(aimTouch);
+    }
+    
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+    if (game.paused) return;
+    // Check if a two-finger fire gesture ended
+    if (game.touchFireActive && e.touches.length < 2) {
+      game.touchFireActive = false;
+    }
+});
+
 
 game.start();
 
